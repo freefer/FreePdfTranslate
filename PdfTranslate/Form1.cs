@@ -8,6 +8,7 @@ using UglyToad.PdfPig;
 using Newtonsoft.Json;
 using System.Text;
 using System.Linq;
+using Newtonsoft.Json.Linq;
 
 namespace PdfTranslate
 {
@@ -20,8 +21,8 @@ namespace PdfTranslate
         private int totalPages = 0;
         // 原始页面改为仅存储临时文件路径，减少内存占用
         private List<string> originalPages = new List<string>();
-        // 翻译结果仅记录临时文件路径，避免占用内存
-        private List<string> translatedPages = new List<string>();
+        // 翻译结果仅记录临时文件路径，避免占用内存（key: 页码，value: 文件路径）
+        private Dictionary<int, string> translatedPages = new Dictionary<int, string>();
         private List<string> pageTexts = new List<string>();
         private List<List<TextBlockInfo>> pageTextBlocks = new List<List<TextBlockInfo>>(); // 存储每页的文本块信息
         private List<PageInfo> pageInfos = new List<PageInfo>(); // 存储每页的尺寸信息
@@ -52,9 +53,6 @@ namespace PdfTranslate
             this.Load += Form1_Load;
             this.Resize += Form1_Resize;
 
-
-            panelTranslatedScroll.Resize += PanelTranslatedScroll_Resize;
-
             SetHighQualityDisplay();
         }
 
@@ -84,36 +82,6 @@ namespace PdfTranslate
         private void Form1_Resize(object? sender, EventArgs e)
         {
             // 分页模式下不需要特殊处理
-        }
-
-
-        private void PanelTranslatedScroll_Resize(object? sender, EventArgs e)
-        {
-            // 如果正在翻译，跳过更新，避免干扰翻译过程
-            if (isTranslating)
-                return;
-                
-            // 滚动面板大小改变时，调整 FlowLayoutPanel 宽度
-            if (flowLayoutPanelTranslated != null && panelTranslatedScroll.ClientSize.Width > 0)
-            {
-                int newWidth = panelTranslatedScroll.ClientSize.Width - 30;
-                if (newWidth > 0 && Math.Abs(flowLayoutPanelTranslated.Width - newWidth) > 10)
-                {
-                    flowLayoutPanelTranslated.Width = newWidth;
-
-                    // 如果有翻译内容，也更新显示（延迟执行，避免立即触发）
-                    if (translatedPages.Count > 0 && !isTranslating)
-                    {
-                        this.BeginInvoke(new Action(() => 
-                        {
-                            if (!isTranslating) // 再次检查，确保翻译没有开始
-                            {
-                                DisplayTranslatedPages();
-                            }
-                        }));
-                    }
-                }
-            }
         }
 
         private void SetHighQualityDisplay()
@@ -215,41 +183,63 @@ namespace PdfTranslate
                                     var page = pigDocument.GetPage(i);
                                     pageTexts.Add(page.Text);
 
-                                    // 提取文本块信息
+                                    // 提取文本块信息 - 使用智能分组
                                     List<TextBlockInfo> textBlocks = new List<TextBlockInfo>();
-                                    var words = page.GetWords();
+                                    var words = page.GetWords().ToList();
+                                    
+                                    // 将单词按空间布局分组成文本块
+                                    var wordGroups = GroupWordsIntoBlocks(words);
                                     int blockId = 0;
 
-                                    foreach (var word in words)
+                                    foreach (var group in wordGroups)
                                     {
-                                        var boundingBox = word.BoundingBox;
+                                        if (group.Count == 0) continue;
 
-                                        // 获取字体信息
-                                        float fontSize = 12; // 默认字体大小
+                                        // 组合文本
+                                        string blockText = string.Join(" ", group.Select(w => w.Text));
+
+                                        // 计算整个文本块的边界框
+                                        var minX = group.Min(w => w.BoundingBox.BottomLeft.X);
+                                        var minY = group.Min(w => w.BoundingBox.BottomLeft.Y);
+                                        var maxX = group.Max(w => w.BoundingBox.TopRight.X);
+                                        var maxY = group.Max(w => w.BoundingBox.TopRight.Y);
+
+                                        // 获取字体信息（使用第一个单词的字体）
+                                        float fontSize = 12;
                                         string fontName = "Arial";
+                                        bool isBold = false;
 
-                                        if (word.Letters.Count > 0)
+                                        var firstWord = group[0];
+                                        if (firstWord.Letters.Count > 0)
                                         {
-                                            var firstLetter = word.Letters[0];
+                                            var firstLetter = firstWord.Letters[0];
                                             fontSize = (float)firstLetter.FontSize;
                                             fontName = firstLetter.FontName ?? "Arial";
+                                            
+                                            // 检测是否加粗：字体名称包含 Bold、Heavy、Black 等关键词
+                                            string fontNameLower = fontName.ToLower();
+                                            isBold = fontNameLower.Contains("bold") || 
+                                                     fontNameLower.Contains("heavy") || 
+                                                     fontNameLower.Contains("black") ||
+                                                     fontNameLower.Contains("semibold") ||
+                                                     fontNameLower.Contains("extrabold");
                                         }
-                                        else
-                                        {
-                                            // 如果没有字母信息，根据高度估算
-                                            fontSize = (float)(boundingBox.TopRight.Y - boundingBox.BottomLeft.Y) * 0.8f;
-                                        }
+                                        // else
+                                        // {
+                                        //     fontSize = (float)(maxY - minY) * 0.8f;
+                                        // }
 
                                         textBlocks.Add(new TextBlockInfo
                                         {
                                             Id = blockId++,
-                                            Text = word.Text,
-                                            X = (float)boundingBox.BottomLeft.X,
-                                            Y = (float)boundingBox.BottomLeft.Y,
-                                            Width = (float)(boundingBox.TopRight.X - boundingBox.BottomLeft.X),
-                                            Height = (float)(boundingBox.TopRight.Y - boundingBox.BottomLeft.Y),
+                                            Text = blockText,
+                                            X = (float)minX,
+                                            Y = (float)minY,
+                                            Width = (float)(maxX - minX),
+                                            Height = (float)(maxY - minY),
                                             FontSize = fontSize,
-                                            FontName = fontName
+                                            FontName = fontName,
+                                            IsBold = isBold
                                         });
                                     }
 
@@ -621,7 +611,7 @@ namespace PdfTranslate
                 lblPageInfo.Text = $"📄 页面: {currentPageIndex + 1} / {totalPages}";
 
                 // 显示翻译结果（如果有），从临时文件加载
-                if (currentPageIndex < translatedPages.Count)
+                if (translatedPages.ContainsKey(currentPageIndex))
                 {
                     var path = translatedPages[currentPageIndex];
                     if (File.Exists(path))
@@ -719,14 +709,18 @@ namespace PdfTranslate
 
                 flowLayoutPanelTranslated.SuspendLayout();
 
-                for (int i = 0; i < translatedPages.Count; i++)
+                // 按页码顺序遍历字典
+                foreach (var kvp in translatedPages.OrderBy(x => x.Key))
                 {
-                    if (!File.Exists(translatedPages[i]))
+                    int pageIndex = kvp.Key;
+                    string pagePath = kvp.Value;
+                    
+                    if (!File.Exists(pagePath))
                     {
                         continue;
                     }
 
-                    using var img = Image.FromFile(translatedPages[i]);
+                    using var img = Image.FromFile(pagePath);
 
                     // 计算图片高度，保持宽高比
                     float aspectRatio = (float)img.Height / img.Width;
@@ -740,13 +734,13 @@ namespace PdfTranslate
                         Height = imageHeight,
                         Margin = new Padding(10, 10, 10, 5),
                         BackColor = Color.Transparent,  // 无边框
-                        Name = $"translatedPageBox_{i}"
+                        Name = $"translatedPageBox_{pageIndex}"
                     };
 
                     // 添加页码标签
                     Label pageLabel = new Label
                     {
-                        Text = $"第 {i + 1} 页",
+                        Text = $"第 {pageIndex + 1} 页",
                         Font = new Font("Segoe UI", 9F, FontStyle.Regular),
                         ForeColor = Color.FromArgb(142, 142, 142),
                         Width = availableWidth,
@@ -798,6 +792,7 @@ namespace PdfTranslate
 
                 for (int i = 0; i < totalPages; i++)
                 {
+                  
                     // 使用 BeginInvoke 更新UI，避免阻塞，允许窗口调整大小
                     if (InvokeRequired)
                     {
@@ -813,22 +808,19 @@ namespace PdfTranslate
                         progressBar.Value = i;
                     }
 
-                    var pageText = i < pageTexts.Count ? pageTexts[i] : "";
                     var pageImagePath = originalPages[i];
 
+             
                     System.Drawing.Image? translatedImage = null;
+                    var pageText = pageTexts[i];
 
-                    if (i==13)
-                    {
-                        var c = pageText;
-                    }
                     // 智能选择翻译方式
                     if (!string.IsNullOrWhiteSpace(pageText) && pageText.Length > 1)
                     {
                         using (var pageImage = Image.FromFile(pageImagePath))
                         {
                             // 使用文本翻译（更快更准）
-                            translatedImage = await TranslatePageWithText(pageImage, pageText, i).ConfigureAwait(false);
+                            translatedImage = await TranslatePageWithText(pageImage, pageText, i, pageTextBlocks[i]).ConfigureAwait(false);
                         }
                     }
                     else
@@ -856,7 +848,7 @@ namespace PdfTranslate
                             // 将原始图像文件复制为占位
                             File.Copy(pageImagePath, pageFilePath, true);
                         }
-                        translatedPages.Add(pageFilePath);
+                        translatedPages[i] = pageFilePath;
 
                         // 如果当前页就是正在翻译的页，立即刷新预览
                         if (i == currentPageIndex)
@@ -956,7 +948,60 @@ namespace PdfTranslate
             }
         }
 
-        private async Task<System.Drawing.Image?> TranslatePageWithText(System.Drawing.Image pageImage, string pageText, int pageNumber)
+        /// <summary>
+        /// 基于空间布局将单词分组成文本块
+        /// </summary>
+        private List<List<UglyToad.PdfPig.Content.Word>> GroupWordsIntoBlocks(List<UglyToad.PdfPig.Content.Word> words)
+        {
+            var result = new List<List<UglyToad.PdfPig.Content.Word>>();
+            if (!words.Any()) return result;
+
+            // 按Y坐标（从上到下）排序单词
+            var sortedWords = words.OrderByDescending(w => w.BoundingBox.Bottom).ThenBy(w => w.BoundingBox.Left).ToList();
+
+            var currentGroup = new List<UglyToad.PdfPig.Content.Word> { sortedWords[0] };
+            double lastYBottom = sortedWords[0].BoundingBox.Bottom;
+            double lastXRight = sortedWords[0].BoundingBox.Right;
+            double lastHeight = sortedWords[0].BoundingBox.Height;
+
+            for (int i = 1; i < sortedWords.Count; i++)
+            {
+                var word = sortedWords[i];
+                double yDiff = Math.Abs(word.BoundingBox.Bottom - lastYBottom);
+                double xGap = word.BoundingBox.Left - lastXRight;
+
+                // 判断是否应该开始新的文本块：
+                // 1. Y坐标差异超过阈值（新行且不在同一行）
+                // 2. X坐标间隙过大（可能是列分隔或段落分隔）
+                double yThreshold = lastHeight * 0.5; // Y方向阈值为行高的50%
+                double xThreshold = lastHeight * 2.0; // X方向阈值为行高的2倍
+
+                if (yDiff > yThreshold || xGap > xThreshold)
+                {
+                    // 开始新的文本块
+                    if (currentGroup.Any())
+                    {
+                        result.Add(currentGroup);
+                    }
+                    currentGroup = new List<UglyToad.PdfPig.Content.Word>();
+                }
+
+                currentGroup.Add(word);
+                lastYBottom = word.BoundingBox.Bottom;
+                lastXRight = word.BoundingBox.Right;
+                lastHeight = word.BoundingBox.Height;
+            }
+
+            // 添加最后一组
+            if (currentGroup.Any())
+            {
+                result.Add(currentGroup);
+            }
+
+            return result;
+        }
+
+        private async Task<System.Drawing.Image?> TranslatePageWithText(System.Drawing.Image pageImage, string pageText, int pageNumber, List<TextBlockInfo> originalTextBlocks)
         {
             try
             {
@@ -970,83 +1015,138 @@ namespace PdfTranslate
                     UpdateStatus($"正在翻译第 {pageNumber + 1} 页文本...");
                 }
 
-                // 直接使用 pageText 进行翻译
-                if (string.IsNullOrWhiteSpace(pageText))
+                // 检查是否有文本块需要翻译
+                if (originalTextBlocks.Count == 0)
                 {
                     return null;
                 }
-                // content =
-                // "请将以下英文文档翻译成中文，保持原有段落、空行、标题、编号/列表、代码或公式等格式不变。" +
-                // "输出要求：1) 仅返回中文正文；2) 保留段落换行与空行，连续空行最多保留一行；" +
-                // "3) 保持标题/编号/列表结构；4) 不添加任何额外解释或标记，不包裹 ``` 代码块；" +
-                // "5) 行内公式和特殊符号原样保留。" +
-                // "\\n\\n原文：\\n\\n" + pageText
-
-                var requestBody = new
+   
+                var allTranslatedTexts = new List<string>();
+                
+                // 逐个翻译每个文本块
+                for (int blockIndex = 0; blockIndex < originalTextBlocks.Count; blockIndex++)
                 {
-                    model = "Qwen3 VL 8B",
-                    messages = new[]
+                    var currentBlock = originalTextBlocks[blockIndex];
+                    
+                    // 跳过空文本块
+                    if (string.IsNullOrWhiteSpace(currentBlock.Text))
                     {
-                        new
+                        allTranslatedTexts.Add("");
+                        continue;
+                    }
+
+                    var requestBody = new
+                    {
+                        model = "Qwen3 VL 8B",
+                        messages = new[]
                         {
-                            role = "user",
-                            content = $"请将以下文本翻译成中文，保持段落结构不变，只返回翻译后的中文文本，不要添加任何解释或额外内容：\\n\\n{pageText}"
-                        }
-                    },
-                    stream = false,
-                    reasoning_format = "auto",
-                    temperature = 0.8,
-                    max_tokens = -1,
-                    dynatemp_range = 0,
-                    dynatemp_exponent = 1,
-                    top_k = 40,
-                    top_p = 0.95,
-                    min_p = 0.05,
-                    xtc_probability = 0,
-                    xtc_threshold = 0.1,
-                    typ_p = 1,
-                    repeat_last_n = 64,
-                    repeat_penalty = 1,
-                    presence_penalty = 0,
-                    frequency_penalty = 0,
-                    dry_multiplier = 0,
-                    dry_base = 1.75,
-                    dry_allowed_length = 2,
-                    dry_penalty_last_n = -1,
-                    samplers = new[] { "penalties", "dry", "top_n_sigma", "top_k", "typ_p", "top_p", "min_p", "xtc", "temperature" },
-                    timings_per_token = true
-                };
+                            new
+                            {
+                                role = "user",
+                                content = $"将以下英文文本翻译成中文，只返回翻译结果，不要添加任何解释：\\n\\n{currentBlock.Text}"
+                            }
+                        },
+                        stream = false,
+                        reasoning_format = "auto",
+                        temperature = 0.8,
+                        max_tokens = -1,
+                        dynatemp_range = 0,
+                        dynatemp_exponent = 1,
+                        top_k = 40,
+                        top_p = 0.95,
+                        min_p = 0.05,
+                        xtc_probability = 0,
+                        xtc_threshold = 0.1,
+                        typ_p = 1,
+                        repeat_last_n = 64,
+                        repeat_penalty = 1,
+                        presence_penalty = 0,
+                        frequency_penalty = 0,
+                        dry_multiplier = 0,
+                        dry_base = 1.75,
+                        dry_allowed_length = 2,
+                        dry_penalty_last_n = -1,
+                        samplers = new[] { "penalties", "dry", "top_n_sigma", "top_k", "typ_p", "top_p", "min_p", "xtc", "temperature" },
+                        timings_per_token = true
+                    };
 
-                var jsonContent = JsonConvert.SerializeObject(requestBody);
-                var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
+                    var jsonContent = JsonConvert.SerializeObject(requestBody);
+                    var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
 
-                // 使用 ConfigureAwait(false) 避免死锁
-                var response = await httpClient.PostAsync(LLAMA_API_URL, content).ConfigureAwait(false);
-                response.EnsureSuccessStatusCode();
+                    // 使用 ConfigureAwait(false) 避免死锁
+                    var response = await httpClient.PostAsync(LLAMA_API_URL, content).ConfigureAwait(false);
+                    response.EnsureSuccessStatusCode();
 
-                var responseBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                var result = JsonConvert.DeserializeObject<dynamic>(responseBody);
+                    var responseBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    var result = JsonConvert.DeserializeObject<dynamic>(responseBody);
 
-                string translatedText = result?.choices?[0]?.message?.content?.ToString() ?? "";
+                    string translatedText = result?.choices?[0]?.message?.content?.ToString() ?? "";
 
-                if (string.IsNullOrWhiteSpace(translatedText))
-                {
-                    return null;
+                    if (string.IsNullOrWhiteSpace(translatedText))
+                    {
+                        // 翻译失败，使用原文
+                        allTranslatedTexts.Add(currentBlock.Text);
+                        System.Diagnostics.Debug.WriteLine($"警告: 块 {blockIndex} 翻译为空，使用原文（页面 {pageNumber}）");
+                        continue;
+                    }
+
+                    // 清理翻译结果
+                    translatedText = translatedText.Trim();
+                    
+                    // 移除可能的引号
+                    if (translatedText.StartsWith("\"") && translatedText.EndsWith("\""))
+                    {
+                        translatedText = translatedText.Substring(1, translatedText.Length - 2);
+                    }
+
+                    allTranslatedTexts.Add(translatedText);
                 }
 
-                // 清理翻译文本（移除可能的markdown代码块标记）
-                translatedText = translatedText.Trim();
-                // if (translatedText.StartsWith("```"))
-                // {
-                //     // 移除markdown代码块标记
-                //     int firstNewline = translatedText.IndexOf('\n');
-                //     int lastNewline = translatedText.LastIndexOf('\n');
-                //     if (firstNewline >= 0 && lastNewline > firstNewline)
-                //     {
-                //         translatedText = translatedText.Substring(firstNewline + 1, lastNewline - firstNewline - 1);
-                //     }
-                //     translatedText = translatedText.Trim();
-                // }
+                // 检查翻译结果数量
+                if (allTranslatedTexts.Count < originalTextBlocks.Count)
+                {
+                    System.Diagnostics.Debug.WriteLine($"警告: 翻译块数({allTranslatedTexts.Count})少于原始块数({originalTextBlocks.Count})");
+                    // 用原文填充缺失的部分
+                    for (int i = allTranslatedTexts.Count; i < originalTextBlocks.Count; i++)
+                    {
+                        allTranslatedTexts.Add(originalTextBlocks[i].Text);
+                    }
+                }
+
+                // 检测重复内容
+                var duplicateGroups = allTranslatedTexts
+                    .Select((text, index) => new { text, index })
+                    .GroupBy(x => x.text)
+                    .Where(g => g.Count() > 1 && g.Key.Length > 20) // 只检查长度>20的重复
+                    .ToList();
+                
+                if (duplicateGroups.Any())
+                {
+                    foreach (var group in duplicateGroups)
+                    {
+                        var indices = string.Join(", ", group.Select(x => x.index));
+                        System.Diagnostics.Debug.WriteLine($"警告: 检测到重复的翻译内容在块 [{indices}]: {group.Key.Substring(0, Math.Min(50, group.Key.Length))}...");
+                    }
+                }
+
+                // 映射到原始文本块
+                var translatedTextBlocks = new List<TextBlockInfo>();
+                for (int i = 0; i < originalTextBlocks.Count; i++)
+                {
+                    var originalBlock = originalTextBlocks[i];
+                    var translatedBlockText = i < allTranslatedTexts.Count ? allTranslatedTexts[i] : originalBlock.Text;
+                    
+                    translatedTextBlocks.Add(new TextBlockInfo
+                    {
+                        Id = originalBlock.Id,
+                        Text = translatedBlockText,
+                        X = originalBlock.X,
+                        Y = originalBlock.Y,
+                        Width = originalBlock.Width,
+                        Height = originalBlock.Height,
+                        FontSize = originalBlock.FontSize
+                    });
+                }
 
                 // 在后台线程创建图像，避免阻塞UI线程
                 var translatedImage = await Task.Run(() => 
@@ -1057,7 +1157,7 @@ namespace PdfTranslate
                     {
                         imageCopy = new Bitmap(pageImage);
                     }
-                    return CreateTranslatedImageCentered(imageCopy, translatedText, pageNumber);
+                    return CreateTranslatedImageFromJson(imageCopy, translatedTextBlocks, pageNumber);
                 }).ConfigureAwait(false);
                 
                 return translatedImage;
@@ -1345,9 +1445,9 @@ namespace PdfTranslate
 
             using (Graphics g = Graphics.FromImage(translatedBitmap))
             {
-                // 设置最高质量渲染
-                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-                g.SmoothingMode = SmoothingMode.AntiAlias;
+                // 设置高质量渲染（优化文本清晰度）
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+                g.SmoothingMode = SmoothingMode.HighQuality;
                 g.InterpolationMode = InterpolationMode.HighQualityBicubic;
                 g.PixelOffsetMode = PixelOffsetMode.HighQuality;
                 g.CompositingQuality = CompositingQuality.HighQuality;
@@ -1372,8 +1472,9 @@ namespace PdfTranslate
                 // 获取原始文本块信息
                 List<TextBlockInfo> originalBlocks = pageIndex < pageTextBlocks.Count ? pageTextBlocks[pageIndex] : new List<TextBlockInfo>();
 
-                // 第一步：使用白色矩形覆盖所有原始文本区域
-                using (Brush whiteBrush = new SolidBrush(Color.White))
+                // 第一步：删除所有原始文本区域（使其透明）
+                g.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
+                using (Brush transparentBrush = new SolidBrush(Color.Transparent))
                 {
                     foreach (var originalBlock in originalBlocks)
                     {
@@ -1383,19 +1484,23 @@ namespace PdfTranslate
                         float imageX = originalBlock.X * scaleX;
                         float pdfTopY = pageInfo.PdfHeight - (originalBlock.Y + originalBlock.Height);
                         float imageY = pdfTopY * scaleY;
-                        float imageWidth = originalBlock.Width * scaleX;
-                        float imageHeight = originalBlock.Height * scaleY;
+                        float imageWidth = originalBlock.Width * scaleX ;  
+                        float imageHeight = originalBlock.Height * scaleY * 1.3f;  
 
-                        // 稍微扩大覆盖区域，确保完全覆盖原始文本
-                        RectangleF coverRect = new RectangleF(
+                        // 稍微扩大删除区域，确保完全删除原始文本
+                        RectangleF deleteRect = new RectangleF(
                             Math.Max(0, imageX - 2),
                             Math.Max(0, imageY - 2),
-                            Math.Min(originalImage.Width - imageX + 2, imageWidth + 4),
-                            Math.Min(originalImage.Height - imageY + 2, imageHeight + 4)
+                            Math.Min(originalImage.Width - (imageX - 2), imageWidth + 4),
+                            Math.Min(originalImage.Height - (imageY - 2), imageHeight + 4)
                         );
-                        g.FillRectangle(whiteBrush, coverRect);
+                        g.FillRectangle(transparentBrush, deleteRect);
                     }
                 }
+                g.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceOver;
+                
+                // 重新设置文本渲染质量（确保文本清晰）
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
 
                 // 第二步：在原始位置绘制翻译文本
                 using (Brush textBrush = new SolidBrush(Color.Black))
@@ -1417,15 +1522,18 @@ namespace PdfTranslate
                         float imageX = originalBlock.X * scaleX;
                         float pdfTopY = pageInfo.PdfHeight - (originalBlock.Y + originalBlock.Height);
                         float imageY = pdfTopY * scaleY;
-                        float imageWidth = originalBlock.Width * scaleX;
-                        float imageHeight = originalBlock.Height * scaleY;
+                        float imageWidth = originalBlock.Width * scaleX ; 
+                        float imageHeight = originalBlock.Height * scaleY * 1.3f; 
 
                         // 使用原始字体大小（转换为图像像素大小）
-                        float fontSize = originalBlock.FontSize * scaleY *1.5f;
+                        float fontSize = originalBlock.FontSize * scaleY;
                         fontSize = Math.Max(6, Math.Min(fontSize, 72)); // 限制字体大小范围
 
+                        // 根据原始字体是否加粗，决定字体样式
+                        FontStyle fontStyle = originalBlock.IsBold ? FontStyle.Bold : FontStyle.Regular;
+
                         // 使用中文字体
-                        Font font = new Font("Microsoft YaHei", fontSize, FontStyle.Regular, GraphicsUnit.Pixel);
+                        Font font = new Font("Microsoft YaHei", fontSize, fontStyle, GraphicsUnit.Pixel);
 
                         // 测量文本大小
                         SizeF textSize = g.MeasureString(translatedBlock.Text, font, (int)imageWidth);
@@ -1435,9 +1543,13 @@ namespace PdfTranslate
                         {
                             fontSize = fontSize * 0.9f;
                             font.Dispose();
-                            font = new Font("Microsoft YaHei", fontSize, FontStyle.Regular, GraphicsUnit.Pixel);
+                            font = new Font("Microsoft YaHei", fontSize, fontStyle, GraphicsUnit.Pixel);
                             textSize = g.MeasureString(translatedBlock.Text, font, (int)imageWidth);
                         }
+
+            
+                        font.Dispose();
+                        font = new Font("Microsoft YaHei", fontSize, fontStyle, GraphicsUnit.Pixel);
 
                         // 绘制翻译文本
                         RectangleF drawRect = new RectangleF(
@@ -1447,15 +1559,8 @@ namespace PdfTranslate
                             Math.Max(imageHeight, textSize.Height)
                         );
 
-                        StringFormat format = new StringFormat
-                        {
-                            Alignment = StringAlignment.Near,
-                            LineAlignment = StringAlignment.Near,
-                            Trimming = StringTrimming.Word,
-                            FormatFlags = StringFormatFlags.LineLimit
-                        };
-
-                        g.DrawString(translatedBlock.Text, font, textBrush, drawRect, format);
+                        // 绘制文本（字符间距：0.5像素，可调整）
+                        DrawStringWithSpacing(g, translatedBlock.Text, font, textBrush, drawRect,3.0f);
 
                         font.Dispose();
                     }
@@ -1463,6 +1568,96 @@ namespace PdfTranslate
             }
 
             return translatedBitmap;
+        }
+
+        // 绘制带字符间距的文本
+        private void DrawStringWithSpacing(Graphics g, string text, Font font, Brush brush, RectangleF rect, float charSpacing = 0f)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return;
+
+            // 如果字符间距为0，使用默认绘制
+            if (charSpacing <= 0)
+            {
+                StringFormat format = new StringFormat
+                {
+                    Alignment = StringAlignment.Near,
+                    LineAlignment = StringAlignment.Near,
+                    Trimming = StringTrimming.Word,
+                    FormatFlags = StringFormatFlags.LineLimit
+                };
+                g.DrawString(text, font, brush, rect, format);
+                return;
+            }
+
+            // 使用字符间距绘制
+            StringFormat sf = StringFormat.GenericTypographic;
+            sf.FormatFlags = StringFormatFlags.MeasureTrailingSpaces;
+
+            float x = rect.X;
+            float y = rect.Y;
+            float maxWidth = rect.Width;
+            float lineHeight = font.GetHeight(g);
+
+            string currentLine = "";
+            float currentLineWidth = 0;
+
+            foreach (char c in text)
+            {
+                // 处理换行符
+                if (c == '\n' || c == '\r')
+                {
+                    if (!string.IsNullOrEmpty(currentLine))
+                    {
+                        DrawLineWithSpacing(g, currentLine, font, brush, x, y, charSpacing, sf);
+                        y += lineHeight;
+                        currentLine = "";
+                        currentLineWidth = 0;
+                    }
+                    continue;
+                }
+
+                string ch = c.ToString();
+                SizeF charSize = g.MeasureString(ch, font, 10000, sf);
+                float charWidth = charSize.Width + charSpacing;
+
+                // 如果加上这个字符会超出宽度，先绘制当前行
+                if (currentLineWidth + charWidth > maxWidth && !string.IsNullOrEmpty(currentLine))
+                {
+                    DrawLineWithSpacing(g, currentLine, font, brush, x, y, charSpacing, sf);
+                    y += lineHeight;
+                    currentLine = ch;
+                    currentLineWidth = charWidth;
+
+                    // 检查是否超出矩形高度
+                    if (y + lineHeight > rect.Bottom)
+                        break;
+                }
+                else
+                {
+                    currentLine += ch;
+                    currentLineWidth += charWidth;
+                }
+            }
+
+            // 绘制最后一行
+            if (!string.IsNullOrEmpty(currentLine) && y + lineHeight <= rect.Bottom)
+            {
+                DrawLineWithSpacing(g, currentLine, font, brush, x, y, charSpacing, sf);
+            }
+        }
+
+        // 绘制单行带字符间距的文本
+        private void DrawLineWithSpacing(Graphics g, string line, Font font, Brush brush, float x, float y, float charSpacing, StringFormat sf)
+        {
+            float currentX = x;
+            foreach (char c in line)
+            {
+                string ch = c.ToString();
+                g.DrawString(ch, font, brush, currentX, y, sf);
+                SizeF charSize = g.MeasureString(ch, font, 10000, sf);
+                currentX += charSize.Width + charSpacing;
+            }
         }
 
         // 创建居中显示的翻译图像（使用 DrawString 内置换行，简单可靠）
@@ -1575,9 +1770,9 @@ namespace PdfTranslate
             
             using (Graphics g = Graphics.FromImage(translatedBitmap))
             {
-                // 设置最高质量渲染
-                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-                g.SmoothingMode = SmoothingMode.AntiAlias;
+                // 设置高质量渲染（优化文本清晰度）
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+                g.SmoothingMode = SmoothingMode.HighQuality;
                 g.InterpolationMode = InterpolationMode.HighQualityBicubic;
                 g.PixelOffsetMode = PixelOffsetMode.HighQuality;
                 g.CompositingQuality = CompositingQuality.HighQuality;
@@ -1589,8 +1784,9 @@ namespace PdfTranslate
                 float scaleX = (float)originalImage.Width / resizedWidth;
                 float scaleY = (float)originalImage.Height / resizedHeight;
                 
-                // 第一步：使用白色矩形覆盖所有文本区域（基于边界框位置）
-                using (Brush whiteBrush = new SolidBrush(Color.White))
+                // 第一步：删除所有文本区域（使其透明，基于边界框位置）
+                g.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
+                using (Brush transparentBrush = new SolidBrush(Color.Transparent))
                 {
                     foreach (var visionBlock in visionBlocks)
                     {
@@ -1600,19 +1796,23 @@ namespace PdfTranslate
                         // 将压缩图像的坐标转换为原始图像坐标
                         float originalX = visionBlock.X * scaleX;
                         float originalY = visionBlock.Y * scaleY;
-                        float originalWidth = visionBlock.Width * scaleX;
-                        float originalHeight = visionBlock.Height * scaleY;
+                        float originalWidth = visionBlock.Width * scaleX * 1.02f;  // 增加2%
+                        float originalHeight = visionBlock.Height * scaleY * 1.02f;  // 增加2%
                         
-                        // 稍微扩大覆盖区域，确保完全覆盖原始文本
-                        RectangleF coverRect = new RectangleF(
+                        // 稍微扩大删除区域，确保完全删除原始文本
+                        RectangleF deleteRect = new RectangleF(
                             Math.Max(0, originalX - 2),
                             Math.Max(0, originalY - 2),
-                            Math.Min(originalImage.Width - originalX + 2, originalWidth + 4),
-                            Math.Min(originalImage.Height - originalY + 2, originalHeight + 4)
+                            Math.Min(originalImage.Width - (originalX - 2), originalWidth + 4),
+                            Math.Min(originalImage.Height - (originalY - 2), originalHeight + 4)
                         );
-                        // g.FillRectangle(whiteBrush, coverRect);
+                        // g.FillRectangle(transparentBrush, deleteRect);
                     }
                 }
+                g.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceOver;
+                
+                // 重新设置文本渲染质量（确保文本清晰）
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
                 
                 // 第二步：在边界框位置绘制翻译文本
                 using (Brush textBrush = new SolidBrush(Color.Black))
@@ -1625,8 +1825,8 @@ namespace PdfTranslate
                         // 将压缩图像的坐标转换为原始图像坐标
                         float originalX = visionBlock.X * scaleX;
                         float originalY = visionBlock.Y * scaleY;
-                        float originalWidth = visionBlock.Width * scaleX;
-                        float originalHeight = visionBlock.Height * scaleY;
+                        float originalWidth = visionBlock.Width * scaleX * 1.02f;  // 增加2%
+                        float originalHeight = visionBlock.Height * scaleY * 1.02f;  // 增加2%
                         
                         // 使用AI返回的字体大小，或根据高度估算
                         float fontSize = visionBlock.FontSize > 0 
@@ -1634,8 +1834,11 @@ namespace PdfTranslate
                             : originalHeight * 0.8f;
                         fontSize = Math.Max(6, Math.Min(fontSize, 72)); // 限制字体大小范围
                         
+                        // 根据是否加粗，决定字体样式
+                        FontStyle fontStyle = visionBlock.IsBold ? FontStyle.Bold : FontStyle.Regular;
+                        
                         // 使用中文字体
-                        Font font = new Font("Microsoft YaHei", fontSize, FontStyle.Regular, GraphicsUnit.Pixel);
+                        Font font = new Font("Microsoft YaHei", fontSize, fontStyle, GraphicsUnit.Pixel);
                         
                         // 测量文本大小
                         SizeF textSize = g.MeasureString(visionBlock.Text, font, (int)originalWidth);
@@ -1645,7 +1848,7 @@ namespace PdfTranslate
                         {
                             fontSize = fontSize * 0.9f;
                             font.Dispose();
-                            font = new Font("Microsoft YaHei", fontSize, FontStyle.Regular, GraphicsUnit.Pixel);
+                            font = new Font("Microsoft YaHei", fontSize, fontStyle, GraphicsUnit.Pixel);
                             textSize = g.MeasureString(visionBlock.Text, font, (int)originalWidth);
                         }
                         
@@ -1657,15 +1860,8 @@ namespace PdfTranslate
                             Math.Max(originalHeight, textSize.Height)
                         );
                         
-                        StringFormat format = new StringFormat
-                        {
-                            Alignment = StringAlignment.Near,
-                            LineAlignment = StringAlignment.Near,
-                            Trimming = StringTrimming.Word,
-                            FormatFlags = StringFormatFlags.LineLimit
-                        };
-                        
-                        g.DrawString(visionBlock.Text, font, textBrush, drawRect, format);
+                        // 绘制文本（字符间距：0.5像素，可调整）
+                        DrawStringWithSpacing(g, visionBlock.Text, font, textBrush, drawRect, 0.5f);
                         
                         font.Dispose();
                     }
@@ -1733,17 +1929,22 @@ namespace PdfTranslate
                         document.Info.Author = "PDF智能翻译工具";
 
                         int totalPages = translatedPages.Count;
+                        int processedCount = 0;
                         
-                        for (int i = 0; i < totalPages; i++)
+                        // 按页码顺序遍历字典
+                        foreach (var kvp in translatedPages.OrderBy(x => x.Key))
                         {
-                            var pagePath = translatedPages[i];
+                            int pageIndex = kvp.Key;
+                            var pagePath = kvp.Value;
+                            
                             if (string.IsNullOrWhiteSpace(pagePath) || !File.Exists(pagePath))
                                 continue;
 
+                            processedCount++;
                             PdfSharpCore.Pdf.PdfPage page = document.AddPage();
                             
                             // 使用原始页面的尺寸信息
-                            PageInfo? pageInfo = i < pageInfos.Count ? pageInfos[i] : null;
+                            PageInfo? pageInfo = pageIndex < pageInfos.Count ? pageInfos[pageIndex] : null;
                             if (pageInfo != null && pageInfo.PdfWidth > 0 && pageInfo.PdfHeight > 0)
                             {
                                 page.Width = XUnit.FromPoint(pageInfo.PdfWidth);
@@ -1775,20 +1976,20 @@ namespace PdfTranslate
                             }
 
                             // 更新进度（每10页更新一次，避免频繁UI更新）
-                            if ((i + 1) % 10 == 0 || i + 1 == totalPages)
+                            if (processedCount % 10 == 0 || processedCount == totalPages)
                             {
-                                int progress = (int)((i + 1) * 100.0 / totalPages);
+                                int progress = (int)(processedCount * 100.0 / totalPages);
                                 if (InvokeRequired)
                                 {
                                     BeginInvoke(new Action(() => 
                                     {
-                                        UpdateStatus($"正在保存 PDF... ({i + 1} / {totalPages})");
+                                        UpdateStatus($"正在保存 PDF... ({processedCount} / {totalPages})");
                                         progressBar.Value = Math.Min(progress, 100);
                                     }));
                                 }
                                 else
                                 {
-                                    UpdateStatus($"正在保存 PDF... ({i + 1} / {totalPages})");
+                                    UpdateStatus($"正在保存 PDF... ({processedCount} / {totalPages})");
                                     progressBar.Value = Math.Min(progress, 100);
                                 }
                             }
@@ -1887,6 +2088,9 @@ namespace PdfTranslate
 
         [JsonProperty("fontName")]
         public string FontName { get; set; } = "";
+
+        [JsonProperty("isBold")]
+        public bool IsBold { get; set; } = false;
     }
 
     // PDF页面尺寸信息
@@ -1918,5 +2122,8 @@ namespace PdfTranslate
 
         [JsonProperty("fontSize")]
         public float FontSize { get; set; }
+
+        [JsonProperty("isBold")]
+        public bool IsBold { get; set; } = false;
     }
 }

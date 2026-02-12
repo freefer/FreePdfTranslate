@@ -1,10 +1,11 @@
 # PDF Translation Tool - Qwen3-VL-8B
 
-This is a Windows Forms-based PDF translation tool that uses the Qwen3-VL-8B vision language model through llama.cpp for intelligent PDF content translation.
+This is a Windows Forms-based PDF translation tool powered by `llama.cpp + Qwen3-VL-8B`, running the model locally for visual understanding and translation, with **no paid cloud endpoint and no paid API required**.
 
 ## Features
 
 - ✅ **High-Definition Preview**: 2000px high-resolution rendering with crystal-clear text and images ⭐ NEW
+- ✅ **Local Free Inference**: Run via llama.cpp locally, no paid endpoint required ⭐ NEW
 - ✅ **Modern UI**: ReaLTaiizor Metro theme, professional and elegant
 - ✅ **PDF Preview**: Load and browse every page of PDF files
 - ✅ **Intelligent Translation**: Recognize and translate PDF content using Qwen3-VL-8B model

@@ -1,10 +1,11 @@
 # PDF 翻译工具 - Qwen3-VL-8B
 
-这是一个基于 Windows Forms 的 PDF 翻译工具，使用 Qwen3-VL-8B 视觉语言模型通过 llama.cpp 进行 PDF 内容的智能翻译。
+这是一个基于 Windows Forms 的 PDF 智能翻译工具，基于 `llama.cpp + Qwen3-VL-8B` 本地化运行模型完成视觉识别与翻译，**无需接入任何收费云接口或付费 API**，开箱即可在本机离线/内网环境使用。
 
 ## 功能特点
 
 - ✅ **高清预览**: 2000px 高分辨率渲染，文字图像清晰锐利 ⭐ NEW
+- ✅ **本地免费推理**: 模型通过 llama.cpp 本地运行，无需任何收费接口 ⭐ NEW
 - ✅ **现代化UI**: ReaLTaiizor Metro 主题，专业美观
 - ✅ **PDF 预览**: 加载并浏览 PDF 文件的每一页
 - ✅ **智能翻译**: 使用 Qwen3-VL-8B 模型识别并翻译 PDF 内容

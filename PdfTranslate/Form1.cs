@@ -1761,7 +1761,7 @@ namespace PdfTranslate
                             {   new
                                 {
                                     type = "text",
-                                    text = "将图中内容翻译成中文"
+                                    text = "翻译图中文字为中文，返回JSON数组，每项包含：original(原文)、translated(译文)、bounding_box(边界框)。格式示例: [{\"original\":\"\",\"translated\":\"\",\"bounding_box\":[x1,y1,x2,y2]}]"
                                 },
                                 new
                                 {
@@ -1816,62 +1816,20 @@ namespace PdfTranslate
                     return null;
                 }
 
-
-                // 将翻译结果按行分割并映射到原始文本块
-                List<TextBlockInfo> translatedTextBlocks = new List<TextBlockInfo>();
+                // 解析视觉模型返回的 JSON（translated + bounding_box）并转换为文本块
+                List<TextBlockInfo> translatedTextBlocks;
                 try
                 {
-                    // 按行分割翻译文本（移除空行）
-                    var translatedLines = translatedText
-                        .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
-                        .Select(line => line.Trim())
-                        .Where(line => !string.IsNullOrWhiteSpace(line))
-                        .ToList();
-
-                    // 获取当前页的原始文本块
-                    List<TextBlockInfo> originalBlocks = pageNumber < pageTextBlocks.Count
-                        ? pageTextBlocks[pageNumber]
-                        : new List<TextBlockInfo>();
-
-                    // 将翻译行映射到原始文本块
-                    for (int i = 0; i < Math.Min(translatedLines.Count, originalBlocks.Count); i++)
-                    {
-                        var originalBlock = originalBlocks[i];
-                        var translatedLine = translatedLines[i];
-
-                        // 创建翻译文本块，保留原始位置信息
-                        translatedTextBlocks.Add(new TextBlockInfo
-                        {
-                            Id = originalBlock.Id,
-                            Text = translatedLine,
-                            X = originalBlock.X,
-                            Y = originalBlock.Y,
-                            Width = originalBlock.Width,
-                            Height = originalBlock.Height,
-                            FontSize = originalBlock.FontSize,
-                            IsBold = originalBlock.IsBold
-                        });
-                    }
-
-                    // 如果翻译行数少于原始块数，补充空文本块
-                    if (translatedLines.Count < originalBlocks.Count)
-                    {
-                        for (int i = translatedLines.Count; i < originalBlocks.Count; i++)
-                        {
-                            var originalBlock = originalBlocks[i];
-                            translatedTextBlocks.Add(new TextBlockInfo
-                            {
-                                Id = originalBlock.Id,
-                                Text = "", // 空文本
-                                X = originalBlock.X,
-                                Y = originalBlock.Y,
-                                Width = originalBlock.Width,
-                                Height = originalBlock.Height,
-                                FontSize = originalBlock.FontSize,
-                                IsBold = originalBlock.IsBold
-                            });
-                        }
-                    }
+                    int resizedWidth = resizedImage?.Width ?? pageImage.Width;
+                    int resizedHeight = resizedImage?.Height ?? pageImage.Height;
+                    translatedTextBlocks = ParseVisionResultToTextBlocks(
+                        translatedText,
+                        pageNumber,
+                        pageImage.Width,
+                        pageImage.Height,
+                        resizedWidth,
+                        resizedHeight,
+                        resizedImage);
                 }
                 catch (Exception ex)
                 {
@@ -1886,6 +1844,11 @@ namespace PdfTranslate
                     return null;
                 }
 
+                if (!translatedTextBlocks.Any())
+                {
+                    return null;
+                }
+
                 // 在后台线程创建图像，根据文本块位置绘制翻译文本
                 var translatedImage = await Task.Run(() =>
                 {
@@ -1895,7 +1858,8 @@ namespace PdfTranslate
                     {
                         imageCopy = new Bitmap(pageImage);
                     }
-                    return CreateTranslatedImageFromVision2(imageCopy, translatedTextBlocks, pageNumber);
+                    // 视觉模式直接按 AI 返回边界框绘制，不依赖原始文本块 ID 映射
+                    return CreateTranslatedImageFromDetectedBlocks(imageCopy, translatedTextBlocks, pageNumber);
                 }).ConfigureAwait(false);
 
                 return translatedImage;
@@ -1919,6 +1883,179 @@ namespace PdfTranslate
             }
         }
 
+        /// <summary>
+        /// 将视觉模型返回的 JSON 数组解析为可绘制文本块。
+        /// </summary>
+        private List<TextBlockInfo> ParseVisionResultToTextBlocks(
+            string modelOutput,
+            int pageNumber,
+            int originalImageWidth,
+            int originalImageHeight,
+            int resizedWidth,
+            int resizedHeight,
+            System.Drawing.Image? debugSourceImage = null)
+        {
+            var result = new List<TextBlockInfo>();
+            var debugRects = new List<RectangleF>();
+            if (string.IsNullOrWhiteSpace(modelOutput))
+            {
+                return result;
+            }
+
+            if (pageNumber >= pageInfos.Count)
+            {
+                return result;
+            }
+
+            var pageInfo = pageInfos[pageNumber];
+            if (pageInfo.PdfWidth <= 0 || pageInfo.PdfHeight <= 0 || pageInfo.ImageWidth <= 0 || pageInfo.ImageHeight <= 0)
+            {
+                return result;
+            }
+
+            float pdfToImageScaleX = pageInfo.ImageWidth / pageInfo.PdfWidth;
+            float pdfToImageScaleY = pageInfo.ImageHeight / pageInfo.PdfHeight;
+            if (pdfToImageScaleX <= 0 || pdfToImageScaleY <= 0)
+            {
+                return result;
+            }
+
+            // 兼容模型返回被 ```json 包裹或前后夹杂说明文本的情况
+            string jsonText = modelOutput.Trim()
+                .Replace("```json", "", StringComparison.OrdinalIgnoreCase)
+                .Replace("```", "");
+            int arrayStart = jsonText.IndexOf('[');
+            int arrayEnd = jsonText.LastIndexOf(']');
+            if (arrayStart >= 0 && arrayEnd > arrayStart)
+            {
+                jsonText = jsonText.Substring(arrayStart, arrayEnd - arrayStart + 1);
+            }
+
+            var items = JsonConvert.DeserializeObject<List<VisionTranslateItem>>(jsonText);
+            if (items == null || items.Count == 0)
+            {
+                return result;
+            }
+            float resizedToOriginalScaleX = (float)originalImageWidth / Math.Max(1, resizedWidth);
+            float resizedToOriginalScaleY = (float)originalImageHeight / Math.Max(1, resizedHeight);
+
+            int id = 0;
+            foreach (var item in items)
+            {
+                if (item == null || item.bounding_box == null)
+                {
+                    continue;
+                }
+
+                string translated = item.translated?.Trim() ?? "";
+                if (string.IsNullOrWhiteSpace(translated))
+                {
+                    continue;
+                }
+
+        
+
+                // 统一使用比例坐标 -> 像素坐标转换，避免不同返回格式导致偏移
+                var pixelBbox = ToPixelCoordinates(item.bounding_box ?? new List<float>(), resizedWidth, resizedHeight);
+                if (pixelBbox == null || pixelBbox.Count < 4)
+                {
+                    continue;
+                }
+
+                float x1 = pixelBbox[0];
+                float y1 = pixelBbox[1];
+                float x2 = pixelBbox[2];
+                float y2 = pixelBbox[3];
+
+                // 将视觉返回边界框按中心放大 0.3（宽高各扩大30%）
+                const float bboxExpandRatio = 0.3f;
+                float boxWidth = x2 - x1;
+                float boxHeight = y2 - y1;
+                float expandW = boxWidth * bboxExpandRatio / 2f;
+                float expandH = boxHeight * bboxExpandRatio / 2f;
+                x1 = Math.Max(0, x1 - expandW);
+                y1 = Math.Max(0, y1 - expandH);
+                x2 = Math.Min(resizedWidth, x2 + expandW);
+                y2 = Math.Min(resizedHeight, y2 + expandH);
+                debugRects.Add(new RectangleF(x1, y1, Math.Max(1, x2 - x1), Math.Max(1, y2 - y1)));
+
+                // 模型返回坐标基于压缩图，先换算到原图像素坐标
+                float imageX = x1 * resizedToOriginalScaleX;
+                float imageY = y1 * resizedToOriginalScaleY;
+                float imageWidth = (x2 - x1) * resizedToOriginalScaleX;
+                float imageHeight = (y2 - y1) * resizedToOriginalScaleY;
+
+                if (imageWidth <= 1 || imageHeight <= 1)
+                {
+                    continue;
+                }
+
+                // 图像坐标 -> PDF 坐标（CreateTranslatedImageFromJson 使用 PDF 坐标）
+                float pdfX = imageX / pdfToImageScaleX;
+                float pdfWidth = imageWidth / pdfToImageScaleX;
+                float pdfHeight = imageHeight / pdfToImageScaleY;
+                float pdfY = pageInfo.PdfHeight - ((imageY + imageHeight) / pdfToImageScaleY);
+
+                // 按 bbox 高度估算基础字体大小（像素高度约 75%）
+                float estimatedFontSizeInImage = imageHeight * 0.75f;
+                float estimatedPdfFontSize = estimatedFontSizeInImage / pdfToImageScaleY;
+
+                result.Add(new TextBlockInfo
+                {
+                    Id = id++,
+                    Text = translated,
+                    X = pdfX,
+                    Y = pdfY,
+                    Width = pdfWidth,
+                    Height = pdfHeight,
+                    FontSize = Math.Max(8f, estimatedPdfFontSize),
+                    FontName = "Microsoft YaHei",
+                    IsBold = false
+                });
+            }
+
+            // 调试：把传给模型的压缩图按返回 bbox 画框并保存到本地
+            // if (debugSourceImage != null && debugRects.Count > 0)
+            // {
+            //     SaveVisionBoundingBoxDebugImage(debugSourceImage, debugRects, pageNumber);
+            // }
+
+            return result;
+        }
+
+        /// <summary>
+        /// 将视觉模型返回的边界框绘制在传输给模型的图像上，便于调试坐标是否准确。
+        /// </summary>
+        private void SaveVisionBoundingBoxDebugImage(System.Drawing.Image sourceImage, List<RectangleF> rects, int pageNumber)
+        {
+            try
+            {
+                string debugDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "debug_vision_bbox");
+                Directory.CreateDirectory(debugDir);
+
+                using Bitmap debugBitmap = new Bitmap(sourceImage);
+                using Graphics g = Graphics.FromImage(debugBitmap);
+                using Pen pen = new Pen(Color.Red, 2f);
+                using Font labelFont = new Font("Microsoft YaHei", 10f, FontStyle.Bold, GraphicsUnit.Pixel);
+                using Brush labelBrush = new SolidBrush(Color.Red);
+
+                for (int i = 0; i < rects.Count; i++)
+                {
+                    var rect = rects[i];
+                    g.DrawRectangle(pen, rect.X, rect.Y, rect.Width, rect.Height);
+                    g.DrawString((i + 1).ToString(), labelFont, labelBrush, rect.X, Math.Max(0, rect.Y - 14));
+                }
+
+                string fileName = $"vision_bbox_p{pageNumber + 1}_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png";
+                string filePath = Path.Combine(debugDir, fileName);
+                debugBitmap.Save(filePath, ImageFormat.Png);
+            }
+            catch
+            {
+                // 调试存图失败不影响主流程
+            }
+        }
+
         private string ImageToBase64(System.Drawing.Image image)
         {
             using (MemoryStream ms = new MemoryStream())
@@ -1927,6 +2064,316 @@ namespace PdfTranslate
                 byte[] imageBytes = ms.ToArray();
                 return Convert.ToBase64String(imageBytes);
             }
+        }
+
+        /// <summary>
+        /// 根据 AI 检测到的文本块直接绘制翻译结果（不依赖原始文本块映射）。
+        /// </summary>
+        private System.Drawing.Image CreateTranslatedImageFromDetectedBlocks(System.Drawing.Image originalImage, List<TextBlockInfo> translatedBlocks, int pageIndex)
+        {
+            Bitmap translatedBitmap = new Bitmap(originalImage.Width, originalImage.Height);
+            translatedBitmap.SetResolution(originalImage.HorizontalResolution, originalImage.VerticalResolution);
+            using Bitmap sourceBitmap = new Bitmap(originalImage);
+
+            using (Graphics g = Graphics.FromImage(translatedBitmap))
+            {
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+                g.SmoothingMode = SmoothingMode.HighQuality;
+                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                g.CompositingQuality = CompositingQuality.HighQuality;
+                g.DrawImage(originalImage, 0, 0, originalImage.Width, originalImage.Height);
+
+                PageInfo? pageInfo = pageIndex < pageInfos.Count ? pageInfos[pageIndex] : null;
+                if (pageInfo == null || pageInfo.PdfWidth == 0 || pageInfo.PdfHeight == 0)
+                {
+                    return translatedBitmap;
+                }
+
+                List<PdfImageRegion>? currentPageImageRegions = pageIndex < pageImageRegions.Count ? pageImageRegions[pageIndex] : null;
+                // 扫描类页面常见“整页背景图”，如果继续保护图片区域会导致文本无法擦除
+                bool hasFullPageBackgroundImage = currentPageImageRegions != null &&
+                    currentPageImageRegions.Any(r =>
+                        r.Width * r.Height >= pageInfo.PdfWidth * pageInfo.PdfHeight * 0.85);
+                List<PdfImageRegion>? eraseProtectionRegions = hasFullPageBackgroundImage ? null : currentPageImageRegions;
+                float scaleX = pageInfo.ImageWidth / pageInfo.PdfWidth;
+                float scaleY = pageInfo.ImageHeight / pageInfo.PdfHeight;
+
+                using (Brush transparentBrush = new SolidBrush(Color.Transparent))
+                {
+                    foreach (var block in translatedBlocks)
+                    {
+                        if (string.IsNullOrWhiteSpace(block.Text))
+                        {
+                            continue;
+                        }
+
+                        float imageX = block.X * scaleX;
+                        float pdfTopY = pageInfo.PdfHeight - (block.Y + block.Height);
+                        float imageY = pdfTopY * scaleY;
+                        float imageWidth = block.Width * scaleX;
+                        float imageHeight = block.Height * scaleY * 1.3f;
+
+                        if (imageWidth <= 1 || imageHeight <= 1)
+                        {
+                            continue;
+                        }
+
+                        // 先擦除原文，再绘制译文
+                        RectangleF deleteRect = new RectangleF(
+                            Math.Max(0, imageX - 2),
+                            Math.Max(0, imageY - 2),
+                            Math.Min(originalImage.Width - (imageX - 2), imageWidth + 4),
+                            Math.Min(originalImage.Height - (imageY - 2), imageHeight + 4)
+                        );
+
+                        if (hasFullPageBackgroundImage)
+                        {
+                            // 整页背景图场景：使用平滑边界插值修补，减少竖向条纹和补丁感
+                            FillRectWithBoundaryInterpolation(translatedBitmap, sourceBitmap, deleteRect);
+                        }
+                        else
+                        {
+                            g.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
+                            FillTransparentRectExcludingImages(
+                                g,
+                                transparentBrush,
+                                deleteRect,
+                                eraseProtectionRegions,
+                                pageInfo,
+                                scaleX,
+                                scaleY);
+                        }
+
+                        g.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceOver;
+
+                        float fontSize = Math.Max(8, Math.Min(block.FontSize * scaleY, 72));
+                        FontStyle fontStyle = block.IsBold ? FontStyle.Bold : FontStyle.Regular;
+                        string singleLineText = block.Text.Replace("\r", " ").Replace("\n", " ").Trim();
+                        if (string.IsNullOrWhiteSpace(singleLineText))
+                        {
+                            continue;
+                        }
+
+                        Font font = new Font("Microsoft YaHei", fontSize, fontStyle, GraphicsUnit.Pixel);
+                        float textWidth = MeasureLineWidthWithSpacing(g, singleLineText, font, fontSpacing);
+                        int shrinkGuard = 0;
+                        float textHeight = font.GetHeight(g);
+                        while ((textWidth > imageWidth || textHeight > imageHeight) && fontSize > 4f && shrinkGuard < 40)
+                        {
+                            fontSize *= 0.92f;
+                            font.Dispose();
+                            font = new Font("Microsoft YaHei", fontSize, fontStyle, GraphicsUnit.Pixel);
+                            textWidth = MeasureLineWidthWithSpacing(g, singleLineText, font, fontSpacing);
+                            textHeight = font.GetHeight(g);
+                            shrinkGuard++;
+                        }
+
+                        RectangleF drawRect = new RectangleF(
+                            imageX,
+                            imageY,
+                            imageWidth,
+                            imageHeight
+                        );
+
+                        // 单行居中绘制：超宽只缩小字体，不自动换行
+                        float startX = drawRect.X + Math.Max(0, (drawRect.Width - textWidth) / 2f);
+                        float startY = drawRect.Y + Math.Max(0, (drawRect.Height - textHeight) / 2f);
+                        StringFormat sf = StringFormat.GenericTypographic;
+                        sf.FormatFlags = StringFormatFlags.MeasureTrailingSpaces;
+                        Color adaptiveTextColor = GetAdaptiveTextColor(sourceBitmap, drawRect);
+                        using Brush textBrush = new SolidBrush(adaptiveTextColor);
+                        DrawLineWithSpacing(g, singleLineText, font, textBrush, startX, startY, fontSpacing, sf);
+                        font.Dispose();
+                    }
+                }
+            }
+
+            return translatedBitmap;
+        }
+
+        /// <summary>
+        /// 使用方向感知的条带插值修补，降低渐变背景中的方块感。
+        /// </summary>
+        private void FillRectWithBoundaryInterpolation(Bitmap targetBitmap, Bitmap sourceBitmap, RectangleF rect)
+        {
+            int left = Math.Max(0, (int)Math.Floor(rect.Left));
+            int top = Math.Max(0, (int)Math.Floor(rect.Top));
+            int right = Math.Min(sourceBitmap.Width - 1, (int)Math.Ceiling(rect.Right));
+            int bottom = Math.Min(sourceBitmap.Height - 1, (int)Math.Ceiling(rect.Bottom));
+
+            if (right <= left || bottom <= top)
+            {
+                return;
+            }
+
+            int width = Math.Max(1, right - left);
+            int height = Math.Max(1, bottom - top);
+            int sampleTopY = Math.Max(0, top - 2);
+            int sampleBottomY = Math.Min(sourceBitmap.Height - 1, bottom + 2);
+            int sampleLeftX = Math.Max(0, left - 2);
+            int sampleRightX = Math.Min(sourceBitmap.Width - 1, right + 2);
+
+            var topStrip = new Color[width + 1];
+            var bottomStrip = new Color[width + 1];
+            var leftStrip = new Color[height + 1];
+            var rightStrip = new Color[height + 1];
+
+            for (int x = 0; x <= width; x++)
+            {
+                int px = left + x;
+                topStrip[x] = sourceBitmap.GetPixel(px, sampleTopY);
+                bottomStrip[x] = sourceBitmap.GetPixel(px, sampleBottomY);
+            }
+
+            for (int y = 0; y <= height; y++)
+            {
+                int py = top + y;
+                leftStrip[y] = sourceBitmap.GetPixel(sampleLeftX, py);
+                rightStrip[y] = sourceBitmap.GetPixel(sampleRightX, py);
+            }
+
+            // 轻度平滑边界采样，减少细碎噪点与文字边缘带来的伪影
+            topStrip = SmoothColorSamples(topStrip, 3);
+            bottomStrip = SmoothColorSamples(bottomStrip, 3);
+            leftStrip = SmoothColorSamples(leftStrip, 3);
+            rightStrip = SmoothColorSamples(rightStrip, 3);
+
+            Color avgTop = AverageColor(topStrip);
+            Color avgBottom = AverageColor(bottomStrip);
+            Color avgLeft = AverageColor(leftStrip);
+            Color avgRight = AverageColor(rightStrip);
+
+            float verticalDelta = ColorDistance(avgTop, avgBottom);
+            float horizontalDelta = ColorDistance(avgLeft, avgRight);
+            bool preferVertical = verticalDelta >= horizontalDelta;
+
+            const int feather = 3; // 仅在边缘轻微羽化，中心区域完全覆盖以抹除原字
+
+            for (int y = top; y <= bottom; y++)
+            {
+                float ty = (float)(y - top) / height;
+                int yi = y - top;
+
+                for (int x = left; x <= right; x++)
+                {
+                    float tx = (float)(x - left) / width;
+                    int xi = x - left;
+
+                    Color fill = preferVertical
+                        ? LerpColor(topStrip[xi], bottomStrip[xi], ty)
+                        : LerpColor(leftStrip[yi], rightStrip[yi], tx);
+
+                    int distToEdge = Math.Min(Math.Min(x - left, right - x), Math.Min(y - top, bottom - y));
+                    if (distToEdge < feather)
+                    {
+                        float edgeAlpha = distToEdge / (float)feather;
+                        edgeAlpha = edgeAlpha * edgeAlpha * (3f - 2f * edgeAlpha); // smoothstep
+                        Color original = sourceBitmap.GetPixel(x, y);
+                        fill = LerpColor(original, fill, edgeAlpha);
+                    }
+
+                    targetBitmap.SetPixel(x, y, fill);
+                }
+            }
+        }
+
+        private Color[] SmoothColorSamples(Color[] samples, int radius)
+        {
+            var result = new Color[samples.Length];
+            for (int i = 0; i < samples.Length; i++)
+            {
+                long r = 0, g = 0, b = 0, count = 0;
+                int start = Math.Max(0, i - radius);
+                int end = Math.Min(samples.Length - 1, i + radius);
+                for (int j = start; j <= end; j++)
+                {
+                    Color c = samples[j];
+                    r += c.R;
+                    g += c.G;
+                    b += c.B;
+                    count++;
+                }
+                result[i] = count == 0
+                    ? samples[i]
+                    : Color.FromArgb((int)(r / count), (int)(g / count), (int)(b / count));
+            }
+            return result;
+        }
+
+        private Color AverageColor(Color[] colors)
+        {
+            if (colors.Length == 0)
+            {
+                return Color.White;
+            }
+
+            long r = 0, g = 0, b = 0;
+            foreach (var c in colors)
+            {
+                r += c.R;
+                g += c.G;
+                b += c.B;
+            }
+            return Color.FromArgb((int)(r / colors.Length), (int)(g / colors.Length), (int)(b / colors.Length));
+        }
+
+        private Color LerpColor(Color a, Color b, float t)
+        {
+            t = Math.Clamp(t, 0f, 1f);
+            int r = (int)(a.R + (b.R - a.R) * t);
+            int g = (int)(a.G + (b.G - a.G) * t);
+            int bl = (int)(a.B + (b.B - a.B) * t);
+            return Color.FromArgb(r, g, bl);
+        }
+
+        private float ColorDistance(Color a, Color b)
+        {
+            float dr = a.R - b.R;
+            float dg = a.G - b.G;
+            float db = a.B - b.B;
+            return MathF.Sqrt(dr * dr + dg * dg + db * db);
+        }
+
+        /// <summary>
+        /// 根据目标文本框背景亮度自适应黑/白字色，避免黑底黑字看不见。
+        /// </summary>
+        private Color GetAdaptiveTextColor(Bitmap bitmap, RectangleF rect)
+        {
+            int left = Math.Max(0, (int)Math.Floor(rect.Left));
+            int top = Math.Max(0, (int)Math.Floor(rect.Top));
+            int right = Math.Min(bitmap.Width - 1, (int)Math.Ceiling(rect.Right));
+            int bottom = Math.Min(bitmap.Height - 1, (int)Math.Ceiling(rect.Bottom));
+            if (right <= left || bottom <= top)
+            {
+                return Color.Black;
+            }
+
+            // 中央区域采样，降低边框线和噪点干扰
+            int sx = left + (right - left) / 4;
+            int sy = top + (bottom - top) / 4;
+            int ex = left + (right - left) * 3 / 4;
+            int ey = top + (bottom - top) * 3 / 4;
+            if (ex <= sx || ey <= sy)
+            {
+                sx = left; sy = top; ex = right; ey = bottom;
+            }
+
+            long lum = 0;
+            long cnt = 0;
+            for (int y = sy; y <= ey; y += 2)
+            {
+                for (int x = sx; x <= ex; x += 2)
+                {
+                    Color c = bitmap.GetPixel(x, y);
+                    lum += (long)(0.299 * c.R + 0.587 * c.G + 0.114 * c.B);
+                    cnt++;
+                }
+            }
+
+            if (cnt == 0) return Color.Black;
+            long avg = lum / cnt;
+            return avg < 125 ? Color.White : Color.Black;
         }
 
         // 压缩图片到指定大小（保持宽高比）
@@ -2710,12 +3157,7 @@ namespace PdfTranslate
 
             return translatedBitmap;
         }
-
-        private System.Drawing.Image CreateTranslatedImageFromVision2(System.Drawing.Image originalImage, List<TextBlockInfo> translatedBlocks, int pageIndex)
-        {
-            // 与 JSON 文本块流程复用同一套删除/绘制逻辑，确保图文混排处理一致。
-            return CreateTranslatedImageFromJson(originalImage, translatedBlocks, pageIndex);
-        }
+ 
 
         private async void btnSavePdf_Click(object? sender, EventArgs e)
         {
@@ -2975,6 +3417,24 @@ namespace PdfTranslate
     }
 
     /// <summary>
+    /// 视觉模型翻译返回的结构化项。
+    /// </summary>
+    public class VisionTranslateItem
+    {
+        [JsonProperty("original")]
+        public string original { get; set; } = "";
+
+        [JsonProperty("translated")]
+        public string translated { get; set; } = "";
+        /// <summary>
+        /// x1,y1,x2,y2 边界框坐标
+        /// </summary>
+
+        [JsonProperty("bounding_box")]
+        public List<float> bounding_box { get; set; } = new List<float>();
+    }
+
+    /// <summary>
     /// 段落信息（包含合并后的文本和位置）
     /// </summary>
     public class ParagraphInfo
@@ -3037,3 +3497,4 @@ namespace PdfTranslate
         public double Height { get; set; }  // 行高
     }
 }
+

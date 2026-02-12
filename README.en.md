@@ -1,5 +1,7 @@
 # PDF Translation Tool - Qwen3-VL-8B
 
+[English (Default)](./README.md) | [中文](./README.zh-CN.md)
+
 This is a Windows Forms-based PDF translation tool powered by `llama.cpp + Qwen3-VL-8B`, running the model locally for visual understanding and translation, with **no paid cloud endpoint and no paid API required**.
 
 ## Features

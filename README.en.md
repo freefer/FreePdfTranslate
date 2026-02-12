@@ -14,6 +14,7 @@ This is a Windows Forms-based PDF translation tool that uses the Qwen3-VL-8B vis
 - ✅ **Batch Processing**: Automatically translate all pages of entire PDF documents
 - ✅ **High Performance**: Based on Google PDFium, fast and stable
 - ✅ **Export Function**: Save translated content as new PDF files
+- ✅ **Vision Bounding-Box Rendering**: Structured `bounding_box` parsing, single-line centered fit, and adaptive background cleanup ⭐ NEW
 
 ## System Requirements
 
@@ -73,6 +74,12 @@ These packages will be automatically installed during build. All dependency libr
    - Choose the save location and filename
    - The translated PDF will be saved
 
+## Runtime Result
+
+Current runtime UI and real-time translation result (original on the left, translated on the right):
+
+![Runtime Result](./example.png)
+
 ## Interface Description
 
 ### Professional ReaLTaiizor UI ⭐ NEW
@@ -128,9 +135,9 @@ For detailed technical documentation, please refer to:
 ### Translation Workflow
 1. Render PDF pages as high-resolution images (300 DPI)
 2. Convert images to Base64 encoding
-3. Send to Qwen3-VL-8B model for visual recognition and translation
-4. Receive translated text
-5. Create new page images, maintaining original layout
+3. Send to Qwen3-VL-8B model for visual recognition and translation (returns `original / translated / bounding_box`)
+4. Parse structured bounding boxes and map them to page coordinates
+5. Erase original text and render translation with adaptive background cleanup, auto text color, and centered single-line scaling
 6. Combine all translated pages into a new PDF file
 
 ## API Configuration

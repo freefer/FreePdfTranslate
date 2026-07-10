@@ -40,10 +40,33 @@ namespace PdfTranslate
         private PictureBox? pictureBoxTranslated;
         //字体间距
         private float fontSpacing = 3.0f;
+        
+        // 目标翻译语言
+        private string targetLanguage = "中文";
+        private Dictionary<string, string> supportedLanguages = new Dictionary<string, string>
+        {
+            { "中文", "Chinese" },
+            { "英文", "English" },
+            { "日文", "Japanese" },
+            { "韩文", "Korean" },
+            { "法文", "French" },
+            { "德文", "German" },
+            { "西班牙文", "Spanish" },
+            { "俄文", "Russian" },
+            { "阿拉伯文", "Arabic" },
+            { "葡萄牙文", "Portuguese" },
+            { "意大利文", "Italian" },
+            { "泰文", "Thai" },
+            { "越南文", "Vietnamese" }
+        };
+        
         public Form1()
         {
             InitializeComponent();
             httpClient.Timeout = TimeSpan.FromMinutes(10);
+            
+            // 初始化语言选择
+            InitializeLanguageSelector();
 
             // 启用高质量渲染，消除圆角锯齿
             this.SetStyle(ControlStyles.OptimizedDoubleBuffer |
@@ -71,6 +94,121 @@ namespace PdfTranslate
             catch { }
             dir = null;
             readyFlag = false;
+        }
+
+        private void InitializeLanguageSelector()
+        {
+            // 创建语言选择标签
+            Label labelLanguage = new Label
+            {
+                Name = "labelLanguage",
+                Text = "目标语言：",
+                AutoSize = true,
+                Location = new Point(this.Width - 240, 15),
+                Font = new Font("Microsoft YaHei", 9F)
+            };
+            
+            // 创建语言选择下拉框
+            ComboBox languageComboBox = new ComboBox
+            {
+                Name = "comboBoxLanguage",
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Width = 110,
+                Location = new Point(this.Width - 150, 12),
+                Font = new Font("Microsoft YaHei", 9F)
+            };
+            
+            // 添加语言选项
+            foreach (var lang in supportedLanguages.Keys)
+            {
+                languageComboBox.Items.Add(lang);
+            }
+            
+            // 添加选择改变事件
+            languageComboBox.SelectedIndexChanged += LanguageComboBox_SelectedIndexChanged;
+            
+            // 添加到窗体（需要先添加才能查找控件）
+            this.Controls.Add(labelLanguage);
+            this.Controls.Add(languageComboBox);
+            
+            // 加载用户之前的语言选择，如果没有则默认选中中文
+            LoadLanguagePreference();
+            if (languageComboBox.SelectedIndex == -1)
+            {
+                languageComboBox.SelectedIndex = 0;
+            }
+            
+            // 监听窗体大小改变，自动调整控件位置
+            this.Resize += (s, e) =>
+            {
+                if (this.Controls.ContainsKey("labelLanguage"))
+                {
+                    this.Controls["labelLanguage"]!.Location = new Point(this.Width - 240, 15);
+                }
+                if (this.Controls.ContainsKey("comboBoxLanguage"))
+                {
+                    this.Controls["comboBoxLanguage"]!.Location = new Point(this.Width - 150, 12);
+                }
+            };
+            
+            // 将控件置于最前
+            labelLanguage.BringToFront();
+            languageComboBox.BringToFront();
+            
+            // 更新标题栏
+            UpdateFormTitle();
+        }
+        
+        private void LanguageComboBox_SelectedIndexChanged(object? sender, EventArgs e)
+        {
+            if (sender is ComboBox comboBox && comboBox.SelectedItem != null)
+            {
+                targetLanguage = comboBox.SelectedItem.ToString() ?? "中文";
+                UpdateFormTitle();
+                SaveLanguagePreference();
+            }
+        }
+        
+        private void SaveLanguagePreference()
+        {
+            try
+            {
+                string configPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "PdfTranslate", "config.txt");
+                Directory.CreateDirectory(Path.GetDirectoryName(configPath)!);
+                File.WriteAllText(configPath, targetLanguage);
+            }
+            catch { }
+        }
+        
+        private void LoadLanguagePreference()
+        {
+            try
+            {
+                string configPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "PdfTranslate", "config.txt");
+                if (File.Exists(configPath))
+                {
+                    string savedLanguage = File.ReadAllText(configPath).Trim();
+                    if (supportedLanguages.ContainsKey(savedLanguage))
+                    {
+                        targetLanguage = savedLanguage;
+                        if (this.Controls.ContainsKey("comboBoxLanguage") && this.Controls["comboBoxLanguage"] is ComboBox comboBox)
+                        {
+                            comboBox.SelectedItem = savedLanguage;
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+        
+        private void UpdateFormTitle()
+        {
+            this.Text = $"PDF 翻译工具 - 目标语言：{targetLanguage}";
+        }
+        
+        private string GetTargetLanguageEnglish()
+        {
+            return supportedLanguages.TryGetValue(targetLanguage, out var englishName) ? englishName : "Chinese";
         }
 
         private void Form1_Load(object? sender, EventArgs e)
@@ -1601,7 +1739,7 @@ namespace PdfTranslate
                             new
                             {
                                 role = "user",
-                                content = $"将以下英文文本翻译成中文，只返回翻译结果，不要添加任何解释：\\n\\n{currentBlock.Text}"
+                                content = $"将以下文本翻译成{targetLanguage}，只返回翻译结果，不要添加任何解释：\\n\\n{currentBlock.Text}"
                             }
                         },
                         stream = false,
@@ -1761,7 +1899,7 @@ namespace PdfTranslate
                             {   new
                                 {
                                     type = "text",
-                                    text = "翻译图中文字为中文，返回JSON数组，每项包含：original(原文)、translated(译文)、bounding_box(边界框)。格式示例: [{\"original\":\"\",\"translated\":\"\",\"bounding_box\":[x1,y1,x2,y2]}]"
+                                    text = $"翻译图中文字为{targetLanguage}，返回JSON数组，每项包含：original(原文)、translated(译文)、bounding_box(边界框)。格式示例: [{{\"original\":\"\",\"translated\":\"\",\"bounding_box\":[x1,y1,x2,y2]}}]"
                                 },
                                 new
                                 {
@@ -2008,7 +2146,7 @@ namespace PdfTranslate
                     Y = pdfY,
                     Width = pdfWidth,
                     Height = pdfHeight,
-                    FontSize = Math.Max(8f, estimatedPdfFontSize),
+                    FontSize = 12,
                     FontName = "Microsoft YaHei",
                     IsBold = false
                 });
@@ -2090,23 +2228,18 @@ namespace PdfTranslate
                     return translatedBitmap;
                 }
 
-                List<PdfImageRegion>? currentPageImageRegions = pageIndex < pageImageRegions.Count ? pageImageRegions[pageIndex] : null;
-                // 扫描类页面常见“整页背景图”，如果继续保护图片区域会导致文本无法擦除
-                bool hasFullPageBackgroundImage = currentPageImageRegions != null &&
-                    currentPageImageRegions.Any(r =>
-                        r.Width * r.Height >= pageInfo.PdfWidth * pageInfo.PdfHeight * 0.85);
-                List<PdfImageRegion>? eraseProtectionRegions = hasFullPageBackgroundImage ? null : currentPageImageRegions;
+ 
                 float scaleX = pageInfo.ImageWidth / pageInfo.PdfWidth;
                 float scaleY = pageInfo.ImageHeight / pageInfo.PdfHeight;
 
+                // 第一步：使用透明色擦除所有原文区域
+                g.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
                 using (Brush transparentBrush = new SolidBrush(Color.Transparent))
                 {
                     foreach (var block in translatedBlocks)
                     {
                         if (string.IsNullOrWhiteSpace(block.Text))
-                        {
                             continue;
-                        }
 
                         float imageX = block.X * scaleX;
                         float pdfTopY = pageInfo.PdfHeight - (block.Y + block.Height);
@@ -2115,11 +2248,9 @@ namespace PdfTranslate
                         float imageHeight = block.Height * scaleY * 1.3f;
 
                         if (imageWidth <= 1 || imageHeight <= 1)
-                        {
                             continue;
-                        }
 
-                        // 先擦除原文，再绘制译文
+                        // 计算删除区域（稍微扩大以确保完全覆盖）
                         RectangleF deleteRect = new RectangleF(
                             Math.Max(0, imageX - 2),
                             Math.Max(0, imageY - 2),
@@ -2127,48 +2258,66 @@ namespace PdfTranslate
                             Math.Min(originalImage.Height - (imageY - 2), imageHeight + 4)
                         );
 
-                        if (hasFullPageBackgroundImage)
-                        {
-                            // 整页背景图场景：使用平滑边界插值修补，减少竖向条纹和补丁感
-                            FillRectWithBoundaryInterpolation(translatedBitmap, sourceBitmap, deleteRect);
-                        }
-                        else
-                        {
-                            g.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
-                            FillTransparentRectExcludingImages(
-                                g,
-                                transparentBrush,
-                                deleteRect,
-                                eraseProtectionRegions,
-                                pageInfo,
-                                scaleX,
-                                scaleY);
-                        }
+                        // 直接填充透明色
+                        g.FillRectangle(transparentBrush, deleteRect);
+                    }
+                }
 
-                        g.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceOver;
+                // 恢复合成模式并设置文本渲染质量
+                g.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceOver;
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
 
-                        float fontSize = Math.Max(8, Math.Min(block.FontSize * scaleY, 72));
+                // 第二步：绘制翻译文本
+                {
+                    foreach (var block in translatedBlocks)
+                    {
+                        if (string.IsNullOrWhiteSpace(block.Text))
+                            continue;
+
+                        float imageX = block.X * scaleX;
+                        float pdfTopY = pageInfo.PdfHeight - (block.Y + block.Height);
+                        float imageY = pdfTopY * scaleY;
+                        float imageWidth = block.Width * scaleX;
+                        float imageHeight = block.Height * scaleY * 1.3f;
+
+                        if (imageWidth <= 1 || imageHeight <= 1)
+                            continue;
+
+                        float fontSize = Math.Max(10, Math.Min(block.FontSize * scaleY, 72));
                         FontStyle fontStyle = block.IsBold ? FontStyle.Bold : FontStyle.Regular;
-                        string singleLineText = block.Text.Replace("\r", " ").Replace("\n", " ").Trim();
-                        if (string.IsNullOrWhiteSpace(singleLineText))
+                        string text = block.Text.Trim();
+                        if (string.IsNullOrWhiteSpace(text))
                         {
                             continue;
                         }
 
                         Font font = new Font("Microsoft YaHei", fontSize, fontStyle, GraphicsUnit.Pixel);
-                        float textWidth = MeasureLineWidthWithSpacing(g, singleLineText, font, fontSpacing);
-                        int shrinkGuard = 0;
-                        float textHeight = font.GetHeight(g);
-                        while ((textWidth > imageWidth || textHeight > imageHeight) && fontSize > 4f && shrinkGuard < 40)
+                        
+                        // 先测量单行文本宽度
+                        float singleLineWidth = MeasureLineWidthWithSpacing(g, text, font, fontSpacing);
+                        
+                        // 判断文本是否需要换行
+                        SizeF textSize;
+                        if (singleLineWidth > imageWidth)
                         {
-                            fontSize *= 0.92f;
-                            font.Dispose();
-                            font = new Font("Microsoft YaHei", fontSize, fontStyle, GraphicsUnit.Pixel);
-                            textWidth = MeasureLineWidthWithSpacing(g, singleLineText, font, fontSpacing);
-                            textHeight = font.GetHeight(g);
-                            shrinkGuard++;
+                            // 文本宽度超过区域宽度，需要换行
+                            textSize = MeasureTextSizeWithSpacing(g, text, font, imageWidth, fontSpacing);
+                            
+                            // 如果换行后高度超过区域高度，适度缩小字体（但保持最小可读性）
+                            while (textSize.Height > imageHeight * 1.2f && fontSize > 10)
+                            {
+                                fontSize = fontSize * 0.92f;
+                                font.Dispose();
+                                font = new Font("Microsoft YaHei", fontSize, fontStyle, GraphicsUnit.Pixel);
+                                textSize = MeasureTextSizeWithSpacing(g, text, font, imageWidth, fontSpacing);
+                            }
                         }
-
+                        else
+                        {
+                            // 文本可以单行显示，不需要缩小字体
+                            textSize = new SizeF(singleLineWidth, font.GetHeight(g));
+                        }
+                        
                         RectangleF drawRect = new RectangleF(
                             imageX,
                             imageY,
@@ -2176,14 +2325,11 @@ namespace PdfTranslate
                             imageHeight
                         );
 
-                        // 单行居中绘制：超宽只缩小字体，不自动换行
-                        float startX = drawRect.X + Math.Max(0, (drawRect.Width - textWidth) / 2f);
-                        float startY = drawRect.Y + Math.Max(0, (drawRect.Height - textHeight) / 2f);
-                        StringFormat sf = StringFormat.GenericTypographic;
-                        sf.FormatFlags = StringFormatFlags.MeasureTrailingSpaces;
+                        // 多行绘制：支持自动换行
                         Color adaptiveTextColor = GetAdaptiveTextColor(sourceBitmap, drawRect);
                         using Brush textBrush = new SolidBrush(adaptiveTextColor);
-                        DrawLineWithSpacing(g, singleLineText, font, textBrush, startX, startY, fontSpacing, sf);
+                        DrawStringWithSpacing(g, text, font, textBrush, drawRect, fontSpacing);
+                        
                         font.Dispose();
                     }
                 }
